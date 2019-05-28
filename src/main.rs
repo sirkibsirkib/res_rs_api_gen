@@ -65,9 +65,9 @@ fn main() {
     }
 }
 
-/// Given an end to a range of port ids (presuming port range 0..`rng_end`) and
-/// a list of ids whose guards render them mutually-exclusively applicable to
-/// states (eg: TTT and FXX).
+/// Given an end to a range of port ids (presuming port range 0..`rng_end`)
+/// (exclusive!) and a list of ids whose guards render them mutually-exclusively
+/// applicable to states (eg: TTT and FXX).
 ///
 /// It produces the powerset construction of these port IDs, omitting any sets
 /// that contain both elements of any mutex pair.
@@ -134,17 +134,4 @@ where
         counter += &one;
     }
     sets
-}
-
-#[test]
-pub fn bigint() {
-    let mut b = num_bigint::BigUint::new(vec![1]);
-    b <<= 2374;
-    let mut dec = num_bigint::BigUint::new(vec![1]);
-    dec <<= 2342;
-    while b > dec {
-        println!("{:?},", b);
-        b ^= &dec;
-    }
-    println!("{:?}", b);
 }
