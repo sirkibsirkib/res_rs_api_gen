@@ -1,0 +1,11 @@
+[package]
+name = "reo_rs_api_gen"
+version = "0.1.0"
+authors = ["sirkibsirkib <christopher.esterhuyse@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+reo_rs = { path = "../reo_rs" }
+reo_rs_proto = { path = "../reo_rs_proto" }
+hashbrown = "0.2.0"
+itertools = "0.8.0"
