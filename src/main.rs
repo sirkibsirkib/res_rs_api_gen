@@ -65,8 +65,9 @@ fn main() {
     }
 }
 
-/// Given a range of port ids eg: 0..10 and a list of ids whose guards render
-/// them mutually-exclusively applicable to states (eg: TTT and FXX).
+/// Given an end to a range of port ids (presuming port range 0..`rng_end`) and
+/// a list of ids whose guards render them mutually-exclusively applicable to
+/// states (eg: TTT and FXX).
 ///
 /// It produces the powerset construction of these port IDs, omitting any sets
 /// that contain both elements of any mutex pair.
@@ -90,7 +91,7 @@ where
     let mut mutex_mask: Vec<_> = std::iter::repeat_with(|| BigUint::default())
         .take(rng_end)
         .collect();
-    // mutex_mask now stores 0 for every id in `s`
+    // mutex_mask now stores 0 for every id in 0..`rng_end`
     for [mut a, mut b] in mutex_pairs.into_iter() {
         if a < b {
             std::mem::swap(&mut a, &mut b);
@@ -101,7 +102,9 @@ where
             one >>= b;
         }
     }
-
+    // mutex_mask[a] stores a bit 1 for every index `b` where:
+    // 1. a > b
+    // 2. ports a and b are mutex
 
     let mut sets = vec![];
     let mut counter = BigUint::default();
@@ -111,8 +114,15 @@ where
         x
     };
     while counter < counter_cap {
+    	// In this instant, `counter` represents a port set in its bits
+    	// 0s correspond to PRESENCE. 1s correspond to ABSENCE.
+    	// eg for port range 0..4: 0b01000 is the set {0,1,2,4}
         for a in (0..rng_end).rev() {
             if counter_contains(&counter, a) {
+            	// SET all bits mutex with a at once.
+            	// corresponds with removing these bits from the set
+            	// results in chunks of the iteration space being skipped
+            	// which would have contained mutex pairs
                 counter |= &mutex_mask[a];
             }
         }
