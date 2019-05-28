@@ -115,7 +115,7 @@ fn main() {
     }).collect::<Vec<_>>();
     println!(" =================\n FINISHED");
     let empty_assign = HashMap::default();
-    for (rules, guard, excluded) in done {
+    for (rules, guard, excluded) in done.iter() {
     	let assign = if let Some(rule_id) = rules.iter().copied().next() {
         	rbpa.rules[rule_id].get_assign()
         } else {
@@ -132,6 +132,57 @@ fn main() {
                 .collect::<Vec<_>>()
         );
     }
+
+    let mut matches = vec![];
+    for state in (SanityCheck { x:0 }) {
+    	matches.clear();
+    	matches.extend(done.iter().enumerate().filter_map(
+    		|(i, (_rules, guard, excluded))| {
+    		if guard_conflict(guard, &state) {
+    			return None
+    		} else {
+    			for ex in excluded.iter() {
+    				if !guard_conflict(&ex.0, &state) {
+		    			return None
+		    		}
+    			}
+    		}
+    		Some(i)
+    	}));
+    	if matches.len() != 1 {
+    		println!("- {:?} has matches {:?}", PrintableGuard(&state), &matches);
+    	} else {
+    		println!("+ {:?} PERFECT {:?}", PrintableGuard(&state), &matches);
+    	}
+    }
+}
+
+struct SanityCheck {
+	x: usize,
+}
+impl<'a> Iterator for SanityCheck {
+	type Item = StatePred;
+	fn next(&mut self) -> Option<Self::Item> {
+		const STOP: usize = !0;
+		if self.x == STOP {
+			None
+		} else {
+			let mut x = HashMap::default();
+			for i in 0..3 {
+				let val = if ((self.x >> i) % 2) == 1 {
+					true
+				} else {
+					false
+				};
+				x.insert(i + 2, val);
+			}
+			self.x += 1;
+			if self.x == 0b1000 {
+				self.x = STOP;
+			}
+			Some(x)
+		}
+	}
 }
 
 struct PrintableGuard<'a>(&'a StatePred);
