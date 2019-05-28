@@ -11,7 +11,6 @@ use itertools::Itertools;
 use num_bigint::BigUint;
 use std::fmt;
 
-
 fn main() {
     let port_set = set! {0, 1};
     let _out = String::new();
@@ -19,7 +18,7 @@ fn main() {
         .new_rbpa(&port_set)
         .expect("WAH");
     rbpa.normalize();
-    let mutex_pairs: Vec<[LocId;2]> = (0..rbpa.rules.len())
+    let mutex_pairs: Vec<[LocId; 2]> = (0..rbpa.rules.len())
         .combinations(2)
         .filter_map(|c| {
             if c[0] < c[1] && rbpa.rules[c[0]].is_mutex_with(&rbpa.rules[c[1]]) {
@@ -64,40 +63,67 @@ fn main() {
         clusters.remove(d);
     }
     println!("============");
-    let rule_set: Vec<_> = clusters.iter().flat_map(|x| x.0.iter()).copied().unique().collect();
+    let rule_set: Vec<_> = clusters
+        .iter()
+        .flat_map(|x| x.0.iter())
+        .copied()
+        .unique()
+        .collect();
     // let mutex_set: HashSet<[LocId;2]> = mutex_pairs.iter().copied().collect();
-    for (rules, guard) in clusters.iter() {
-    	println!("{:?}:\tguard: {:?}", rules, PrintableGuard(guard));
-        let mut excluded_guards: Vec<StatePred> = vec![];
-        'outer: for &r1 in &rule_set {
-        	if rules.contains(&r1) {
-        		continue; // rule is INCLUDED!
-        	}
-        	// must exclude!
-        	let r1_guard = rbpa.rules[r1].get_guard();
-	        for e in excluded_guards.iter_mut() {
-	        	if let Some(fused) = fuse_guards(e, r1_guard, true) {
-        			// need to make sure this fusion doesn't capture too much
-	        		if fuse_guards(e, guard, false).is_none() {
-		        		*e = fused;
-		        		continue 'outer;
-	        		} 
-	        	}
-	        }
-	        // failed to fuse. add it.
-	        excluded_guards.push(r1_guard.clone());
+    let done = clusters.into_iter().filter_map(|(rules, guard)| {
+        println!("{:?}:\tguard: {:?}", rules, PrintableGuard(&guard));
+        let mut excluded: Vec<(StatePred, Vec<usize>)> = vec![];
+        'outer: for &rule_id in &rule_set {
+            if rules.contains(&rule_id) {
+                continue; // rule is INCLUDED!
+            }
+            // println!("is {:?}", excluded.iter().map(|x| PrintableGuard(x)).collect::<Vec<_>>());
+
+            // must exclude!
+            let rule_guard = rbpa.rules[rule_id].get_guard();
+            for (e_guard, e_rules) in excluded.iter_mut() {
+                if let Some(fused) = fuse_guards(e_guard, rule_guard) {
+                    if guard_shadowed(&guard, &fused) {
+                        println!("SHADOWED");
+                        return None;
+                    }
+                    *e_guard = fused;
+                    e_rules.push(rule_id);
+                    // println!("fuse succeeded");
+                    continue 'outer;
+                }
+            }
+            // failed to fuse. add it.
+            if guard_shadowed(&guard, rule_guard) {
+                println!("SHADOWED");
+                return None;
+            }
+            excluded.push((rule_guard.clone(), vec![rule_id]));
         }
-        for e in excluded_guards.iter() {
-        	println!("exclude: {:?}", PrintableGuard(e));
+        for (e_guard, e_rules) in excluded.iter() {
+            println!(" - exclude: {:?}", (PrintableGuard(e_guard), e_rules));
         }
+        Some((rules, guard, excluded))
+    }).collect::<Vec<_>>();
+    println!(" =================\n FINISHED");
+    for (rules, guard, excluded) in done {
+        println!(
+            "{:?}:\tguard: {:?}\texcluded: {:?}",
+            rules,
+            PrintableGuard(&guard),
+            excluded
+                .iter()
+                .map(|x| PrintableGuard(&x.0))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
 struct PrintableGuard<'a>(&'a StatePred);
 impl<'a> fmt::Debug for PrintableGuard<'a> {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let mut buf = vec!['.';5];
-		for (&k, &v) in self.0.iter() {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut buf = vec!['.'; 5];
+        for (&k, &v) in self.0.iter() {
             if buf.len() <= k {
                 buf.resize_with(k + 1, || '.');
             }
@@ -107,7 +133,7 @@ impl<'a> fmt::Debug for PrintableGuard<'a> {
             write!(f, "{}", b)?;
         }
         Ok(())
-	}
+    }
 }
 
 enum FuseCase {
@@ -117,23 +143,33 @@ enum FuseCase {
     Identical,
 }
 
-fn fuse_guards(l: &StatePred, r: &StatePred, discrepency_ok: bool) -> Option<StatePred> {
-	use FuseCase::*;
+fn guard_shadowed(shadowed: &StatePred, shadowing: &StatePred) -> bool {
+    for (id, x) in shadowed.iter() {
+        match shadowing.get(id) {
+            Some(y) if x != y => return false,
+            _ => (),
+        }
+    }
+    true
+}
+
+fn fuse_guards(l: &StatePred, r: &StatePred) -> Option<StatePred> {
+    use FuseCase::*;
     let mut g_case = Identical;
     for id in l.keys().chain(r.keys()).unique() {
         match [l.get(id), r.get(id)] {
             [Some(_), None] => match g_case {
-                LeftSubsumes | Identical => g_case = LeftSubsumes,
-                _ => return None,
-            }
-            [None, Some(_)] => match g_case {
                 RightSubsumes | Identical => g_case = RightSubsumes,
                 _ => return None,
-            }
-            [Some(a), Some(b)] if a!=b => match g_case {
-                Identical if discrepency_ok => g_case = PartitionAt(*id),
+            },
+            [None, Some(_)] => match g_case {
+                LeftSubsumes | Identical => g_case = LeftSubsumes,
                 _ => return None,
-            }
+            },
+            [Some(a), Some(b)] if a != b => match g_case {
+                Identical => g_case = PartitionAt(*id),
+                _ => return None,
+            },
             [Some(_), Some(_)] => (),
             [None, None] => unreachable!(),
         }
@@ -157,10 +193,10 @@ fn fuse_guards(l: &StatePred, r: &StatePred, discrepency_ok: bool) -> Option<Sta
 /// that contain both elements of any mutex pair.
 fn powerset<I>(rng_end: LocId, mutex_pairs: I) -> Vec<Vec<LocId>>
 where
-    I: IntoIterator<Item = [LocId;2]>,
+    I: IntoIterator<Item = [LocId; 2]>,
 {
-	// initializes and defines an auxiliary closure for computing whether
-	// the current counter represents a set containing the given id.
+    // initializes and defines an auxiliary closure for computing whether
+    // the current counter represents a set containing the given id.
     let zero = BigUint::default();
     let mut temp = BigUint::new(vec![1]);
     let mut counter_contains = move |counter: &BigUint, id: LocId| {
@@ -198,15 +234,15 @@ where
         x
     };
     while counter < counter_cap {
-    	// In this instant, `counter` represents a port set in its bits
-    	// 0s correspond to PRESENCE. 1s correspond to ABSENCE.
-    	// eg for port range 0..4: 0b01000 is the set {0,1,2,4}
+        // In this instant, `counter` represents a port set in its bits
+        // 0s correspond to PRESENCE. 1s correspond to ABSENCE.
+        // eg for port range 0..4: 0b01000 is the set {0,1,2,4}
         for a in (0..rng_end).rev() {
             if counter_contains(&counter, a) {
-            	// SET all bits mutex with a at once.
-            	// corresponds with removing these bits from the set
-            	// results in chunks of the iteration space being skipped
-            	// which would have contained mutex pairs
+                // SET all bits mutex with a at once.
+                // corresponds with removing these bits from the set
+                // results in chunks of the iteration space being skipped
+                // which would have contained mutex pairs
                 counter |= &mutex_mask[a];
             }
         }
