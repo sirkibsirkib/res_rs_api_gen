@@ -26,7 +26,7 @@ fn main() {
         })
         .collect();
     println!("mutex_pairs {:?}", &mutex_pairs);
-    let p = powerset(0..8, mutex_pairs.iter().copied());
+    let p = powerset(rbpa.rules.len(), mutex_pairs.iter().copied());
     let mut guards: Vec<_> = p
         .into_iter()
         .map(|set| {
@@ -65,50 +65,58 @@ fn main() {
     }
 }
 
-fn powerset<I>(s: Range<LocId>, mutex_pairs: I) -> Vec<Vec<LocId>>
+/// Given a range of port ids eg: 0..10 and a list of ids whose guards render
+/// them mutually-exclusively applicable to states (eg: TTT and FXX).
+///
+/// It produces the powerset construction of these port IDs, omitting any sets
+/// that contain both elements of any mutex pair.
+fn powerset<I>(rng_end: LocId, mutex_pairs: I) -> Vec<Vec<LocId>>
 where
     I: IntoIterator<Item = [LocId;2]>,
 {
+	// initializes and defines an auxiliary closure for computing whether
+	// the current counter represents a set containing the given id.
     let zero = BigUint::default();
-    let mut shifter = BigUint::new(vec![1]);
-    let mut counter_contains = |counter: &BigUint, index: usize| {
-        // invariant: shifter == 1
-        shifter <<= index;
-        shifter &= counter;
-        let ret = shifter == zero;
-        shifter.assign_from_slice(&[1]);
-        ret
+    let mut temp = BigUint::new(vec![1]);
+    let mut counter_contains = move |counter: &BigUint, id: LocId| {
+        temp.assign_from_slice(&[1]);
+        temp <<= id;
+        temp &= counter;
+        // temp is now either 2^id or 0. 0 means "counter DOES contain this element"
+        temp == zero
     };
 
     let mut one = BigUint::new(vec![1]);
-    let mut mask: Vec<_> = std::iter::repeat_with(|| BigUint::default())
-        .take(s.len())
+    let mut mutex_mask: Vec<_> = std::iter::repeat_with(|| BigUint::default())
+        .take(rng_end)
         .collect();
+    // mutex_mask now stores 0 for every id in `s`
     for [mut a, mut b] in mutex_pairs.into_iter() {
         if a < b {
             std::mem::swap(&mut a, &mut b);
         }
         if a > b {
             one <<= b;
-            mask[a] |= &one;
+            mutex_mask[a] |= &one;
             one >>= b;
         }
     }
+
 
     let mut sets = vec![];
     let mut counter = BigUint::default();
     let counter_cap = {
         let mut x = BigUint::new(vec![1]);
-        x <<= s.len();
+        x <<= rng_end;
         x
     };
     while counter < counter_cap {
-        for a in (0..s.len()).rev() {
+        for a in (0..rng_end).rev() {
             if counter_contains(&counter, a) {
-                counter |= &mask[a];
+                counter |= &mutex_mask[a];
             }
         }
-        let set = s
+        let set = (0..rng_end)
             .clone()
             .filter(|&x| counter_contains(&counter, x))
             .collect();
