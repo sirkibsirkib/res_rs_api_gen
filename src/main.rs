@@ -30,7 +30,7 @@ fn main() {
         .collect();
     println!("mutex_pairs {:?}", &mutex_pairs);
     let p = powerset(rbpa.rules.len(), mutex_pairs.iter().copied());
-    let mut clusters: Vec<_> = p
+    let mut clusters: Vec<(Vec<LocId>, StatePred)> = p
         .into_iter()
         .map(|set| {
             let mut guard = HashMap::default();
@@ -40,8 +40,9 @@ fn main() {
             (set, guard)
         })
         .collect();
-    for g in clusters.iter() {
-        println!("{:?}", g);
+    println!("clusters:");
+    for (i, (set, guard)) in clusters.iter().enumerate() {
+        println!("c{}\t {:?}: {:?}", i, PrintableGuard(guard), set);
     }
     let mut to_drop = vec![];
     for g in clusters.iter().enumerate().combinations(2) {
@@ -73,44 +74,58 @@ fn main() {
     let done = clusters.into_iter().filter_map(|(rules, guard)| {
         println!("{:?}:\tguard: {:?}", rules, PrintableGuard(&guard));
         let mut excluded: Vec<(StatePred, Vec<usize>)> = vec![];
-        'outer: for &rule_id in &rule_set {
-            if rules.contains(&rule_id) {
+        'outer: for &excluded_rid in &rule_set {
+            if rules.contains(&excluded_rid) {
                 continue; // rule is INCLUDED!
             }
-            // println!("is {:?}", excluded.iter().map(|x| PrintableGuard(x)).collect::<Vec<_>>());
-
             // must exclude!
-            let rule_guard = rbpa.rules[rule_id].get_guard();
+            let excluded_guard = rbpa.rules[excluded_rid].get_guard();
+            if guard_conflict(excluded_guard, &guard) {
+            	// implicitly excluded by guard already
+            	continue 'outer;
+            }
             for (e_guard, e_rules) in excluded.iter_mut() {
-                if let Some(fused) = fuse_guards(e_guard, rule_guard) {
-                    if guard_shadowed(&guard, &fused) {
-                        println!("SHADOWED");
+                if let Some(exc_fused) = fuse_guards(e_guard, excluded_guard) {
+                    if implies(&guard, &exc_fused) {
+            			// the guard is unsatisfiable
+            			println!("shadowed by (fused) {:?}", PrintableGuard(&exc_fused));
                         return None;
                     }
-                    *e_guard = fused;
-                    e_rules.push(rule_id);
-                    // println!("fuse succeeded");
+                    e_rules.push(excluded_rid);
+                    *e_guard = exc_fused;
                     continue 'outer;
                 }
             }
-            // failed to fuse. add it.
-            if guard_shadowed(&guard, rule_guard) {
-                println!("SHADOWED");
+            if implies(&guard, excluded_guard) {
+            			// the guard is unsatisfiable
+    			println!("unsatisfiable {:?}", PrintableGuard(excluded_guard));
                 return None;
             }
-            excluded.push((rule_guard.clone(), vec![rule_id]));
+            excluded.push((excluded_guard.clone(), vec![excluded_rid]));
         }
+        for (e_guard, e_rules) in excluded.iter() {
+            println!(" - exclude: {:?}", (PrintableGuard(e_guard), e_rules));
+        }
+        println!("RETAIN..");
+        excluded.retain(|x| !guard_conflict(&guard, &x.0));
         for (e_guard, e_rules) in excluded.iter() {
             println!(" - exclude: {:?}", (PrintableGuard(e_guard), e_rules));
         }
         Some((rules, guard, excluded))
     }).collect::<Vec<_>>();
     println!(" =================\n FINISHED");
+    let empty_assign = HashMap::default();
     for (rules, guard, excluded) in done {
+    	let assign = if let Some(rule_id) = rules.iter().copied().next() {
+        	rbpa.rules[rule_id].get_assign()
+        } else {
+        	&empty_assign
+        };
         println!(
-            "{:?}:\tguard: {:?}\texcluded: {:?}",
+            "rules: {:?}\tguard: {:?}\tassign: {:?}\texcluded: {:?}",
             rules,
             PrintableGuard(&guard),
+            PrintableGuard(assign),
             excluded
                 .iter()
                 .map(|x| PrintableGuard(&x.0))
@@ -143,13 +158,26 @@ enum FuseCase {
     Identical,
 }
 
-fn guard_shadowed(shadowed: &StatePred, shadowing: &StatePred) -> bool {
-    for (id, x) in shadowed.iter() {
-        match shadowing.get(id) {
-            Some(y) if x != y => return false,
+fn guard_conflict(a: &StatePred, b: &StatePred) -> bool {
+	for (id, x) in a.iter() {
+        match b.get(id) {
+            Some(y) if x != y => return true,
             _ => (),
         }
     }
+    false
+}
+
+/// returns true if 
+fn implies(anticedent: &StatePred, consequent: &StatePred) -> bool {
+	if guard_conflict(anticedent, consequent) {
+		return false
+	}
+	for id in consequent.keys() {
+		if !anticedent.contains_key(id) {
+			return false
+		}
+	}
     true
 }
 
