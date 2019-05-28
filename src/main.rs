@@ -1,10 +1,11 @@
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use reo_rs::proto::traits::Proto;
-use reo_rs::rbpa::Rbpa;
+
+use reo_rs::set;
 use reo_rs::LocId;
-use reo_rs::{map, set};
 use std::ops::Range;
 // use std::io::Write;
+use itertools::Itertools;
 
 fn main() {
     let port_set = set! {0, 1};
@@ -13,7 +14,6 @@ fn main() {
         .new_rbpa(&port_set)
         .expect("WAH");
     rbpa.normalize();
-    use itertools::Itertools;
     let mutex_pairs: Vec<(LocId, LocId)> = (0..rbpa.rules.len())
         .combinations(2)
         .filter_map(|c| {
@@ -24,44 +24,52 @@ fn main() {
             }
         })
         .collect();
+    println!("mutex_pairs {:?}", &mutex_pairs);
     let p = powerset(0..8, mutex_pairs.iter().copied());
-    let mut guard = HashMap::default();
-    for set in p.iter() {
-        for &s in set.iter() {
-            rbpa.rules[s].constrain_guard(&mut guard).expect("oops");
-        }
-        print!("set: {:?} guard:\t", set);
-        let mut buf = vec!['.'; 5];
-        for (&k, &v) in guard.iter() {
-            if buf.len() <= k {
-                buf.resize_with(k + 1, || '.');
+    let mut guards: Vec<_> = p
+        .into_iter()
+        .map(|set| {
+            let mut guard = HashMap::default();
+            for &s in set.iter() {
+                rbpa.rules[s].constrain_guard(&mut guard).expect("oops");
             }
-            buf[k] = if v { 'T' } else { 'F' };
+            (set, guard)
+        })
+        .collect();
+    for g in guards.iter() {
+        println!("{:?}", g);
+    }
+    let mut to_drop = vec![];
+    for g in guards.iter().enumerate().combinations(2) {
+        let (ai, (ak, av)) = g[0];
+        let (bi, (bk, bv)) = g[1];
+        if av == bv {
+        	if ak.len() > bk.len() {
+        		to_drop.push(bi);
+        		println!(
+	                "({:?}) {:?} encompasses ({:?}) {:?}",
+	                bk, bv, ak, av
+	            );
+        	} else {
+        		to_drop.push(ai);
+        		println!(
+	                "({:?}) {:?} encompasses ({:?}) {:?}",
+	                 ak, av, bk, bv,
+	            );
+        	}
         }
-        for b in buf.drain(..) {
-            print!("{}", b);
-        }
-        println!();
-        guard.clear();
+    }
+    to_drop.sort();
+    to_drop.dedup();
+    for &d in to_drop.iter().rev() {
+        guards.remove(d);
+    }
+    println!("============");
+    for g in guards.iter() {
+        println!("{:?}", g);
     }
 }
 
-// fn compute_mutex_pairs(rbpa: &Rbpa) -> HashMap<LocId, HashSet<LocId>> {
-//     let num_rules = rbpa.rules.len();
-//     assert!(num_rules > 0);
-//     let mut mutex_pairs = HashMap::<LocId, HashSet<LocId>>::default();
-//     for i in 0..(num_rules - 1) {
-//         for j in (i + 1)..num_rules {
-//             if rbpa.rules[j].is_mutex_with(&rbpa.rules[i]) {
-//                 mutex_pairs
-//                     .entry(j)
-//                     .or_insert_with(HashSet::default)
-//                     .insert(i);
-//             }
-//         }
-//     }
-//     mutex_pairs
-// }
 
 fn powerset<I>(s: Range<LocId>, mutex_pairs: I) -> Vec<Vec<LocId>>
 where
@@ -90,7 +98,7 @@ where
     let counter_cap = 2usize.pow(s.len() as u32);
     while counter < counter_cap {
         println!("ctr... {}", counter);
-        for a in 0..s.len() {
+        for a in (0..s.len()).rev() {
             if counter_contains(counter, a) {
                 counter |= mask[a];
             }
