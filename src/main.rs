@@ -13,11 +13,16 @@ use std::fmt;
 
 fn main() {
     let port_set = set! {0, 1};
-    let _out = String::new();
+
+    // 1. fetch the RBPA, projected onto your port set
     let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
         .new_rbpa(&port_set)
         .expect("WAH");
+
+    // 2. normalize RBPA (removing silent transitions)
     rbpa.normalize();
+
+    // 3. compute which pairs of rules are mutually exclusive
     let mutex_pairs: Vec<[LocId; 2]> = (0..rbpa.rules.len())
         .combinations(2)
         .filter_map(|c| {
@@ -29,6 +34,8 @@ fn main() {
         })
         .collect();
     println!("mutex_pairs {:?}", &mutex_pairs);
+
+    // 4. 
     let p = powerset(rbpa.rules.len(), mutex_pairs.iter().copied());
     let mut clusters: Vec<(Vec<LocId>, StatePred)> = p
         .into_iter()
@@ -274,7 +281,7 @@ fn powerset<I>(rng_end: LocId, mutex_pairs: I) -> Vec<Vec<LocId>>
 where
     I: IntoIterator<Item = [LocId; 2]>,
 {
-    // initializes and defines an auxiliary closure for computing whether
+    // 1. initialize and defines an auxiliary closure for computing whether
     // the current counter represents a set containing the given id.
     let zero = BigUint::default();
     let mut temp = BigUint::new(vec![1]);
@@ -290,6 +297,8 @@ where
     let mut mutex_mask: Vec<_> = std::iter::repeat_with(|| BigUint::default())
         .take(rng_end)
         .collect();
+
+    // 2. precompute the "jump distances" in the counter for every port.
     // mutex_mask now stores 0 for every id in 0..`rng_end`
     for [mut a, mut b] in mutex_pairs.into_iter() {
         if a < b {
@@ -302,9 +311,11 @@ where
         }
     }
     // mutex_mask[a] stores a bit 1 for every index `b` where:
-    // 1. a > b
-    // 2. ports a and b are mutex
+    // * a > b
+    // * ports a and b are mutex
 
+    // 3. Iterate over the set-space and jump over those that represent
+    // sets containing 1+ mutual exclusion groups. 
     let mut sets = vec![];
     let mut counter = BigUint::default();
     let counter_cap = {
