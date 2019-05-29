@@ -6,7 +6,7 @@ use reo_rs::proto::traits::Proto;
 use reo_rs::set;
 use reo_rs::LocId;
 
-// use std::io::Write;
+use std::io::Write;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use std::fmt;
@@ -14,10 +14,13 @@ use std::fmt;
 fn main() {
     let port_set = set! {0, 1};
 
+    let mut s = String::new();
+
     // 1. fetch the RBPA, projected onto your port set
     let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
         .new_rbpa(&port_set)
         .expect("WAH");
+    println!("RBPA START: {:#?}", &rbpa);
 
     // 2. normalize RBPA (removing silent transitions)
     rbpa.normalize();
@@ -57,11 +60,15 @@ fn main() {
         let (bi, (bk, bv)) = g[1];
         if av == bv {
             if ak.len() > bk.len() {
-                to_drop.push(bi);
-                println!("{:?} encompasses {:?} for guard {:?}", ak, bk, av);
-            } else {
-                to_drop.push(ai);
-                println!("{:?} encompasses {:?} for guard {:?}", bk, ak, av);
+            	if superset_vec(ak, bk) {
+                	to_drop.push(bi);
+	                println!("{:?} encompasses {:?} for guard {:?}", ak, bk, av);
+	            }
+            } else if ak.len() < bk.len() {
+            	if superset_vec(bk, ak) {
+	                to_drop.push(ai);
+	                println!("{:?} encompasses {:?} for guard {:?}", bk, ak, av);
+            	}
             }
         }
     }
@@ -162,6 +169,15 @@ fn main() {
     		println!("+ {:?} PERFECT {:?}", PrintableGuard(&state), &matches);
     	}
     }
+}
+
+fn superset_vec(a: &Vec<LocId>, b: &Vec<LocId>) -> bool {
+	for x in b.iter() {
+		if !a.contains(x) {
+			return false
+		}
+	}
+	true
 }
 
 struct SanityCheck {
