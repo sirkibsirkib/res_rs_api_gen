@@ -343,7 +343,8 @@ where
         // In this instant, `counter` represents a port set in its bits
         // 0s correspond to PRESENCE. 1s correspond to ABSENCE.
         // eg for port range 0..4: 0b01000 is the set {0,1,2,4}
-        for a in (0..rng_end).rev() {
+        // (also: safe to skip 0th mask. it's always empty)
+        for a in (1..rng_end).rev() {
             if counter_contains(&counter, a) {
                 // SET all bits mutex with a at once.
                 // corresponds with removing these bits from the set
