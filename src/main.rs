@@ -6,15 +6,15 @@ use reo_rs::proto::traits::Proto;
 use reo_rs::set;
 use reo_rs::LocId;
 
-use std::io::Write;
+// use std::io::Write;
 use itertools::Itertools;
 use num_bigint::BigUint;
 use std::fmt;
 
 fn main() {
-    let port_set = set! {0, 1};
+    let port_set = set! {0,1};
 
-    let mut s = String::new();
+    // let mut s = String::new();
 
     // 1. fetch the RBPA, projected onto your port set
     let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
@@ -26,7 +26,7 @@ fn main() {
     rbpa.normalize();
 
     // 3. compute which pairs of rules are mutually exclusive
-    let mutex_pairs: Vec<[LocId; 2]> = (0..rbpa.rules.len())
+    let mutex_pairs = (0..rbpa.rules.len())
         .combinations(2)
         .filter_map(|c| {
             if c[0] < c[1] && rbpa.rules[c[0]].is_mutex_with(&rbpa.rules[c[1]]) {
@@ -34,12 +34,14 @@ fn main() {
             } else {
                 None
             }
-        })
-        .collect();
-    println!("mutex_pairs {:?}", &mutex_pairs);
+        });
+    // println!("mutex_pairs {:?}", &mutex_pairs);
 
     // 4. 
-    let p = powerset(rbpa.rules.len(), mutex_pairs.iter().copied());
+    let p = powerset(rbpa.rules.len(), mutex_pairs);
+    if p.len() > 200 {
+        panic!("POWERSET TOO HUGE");
+    }
     let mut clusters: Vec<(Vec<LocId>, StatePred)> = p
         .into_iter()
         .map(|set| {
@@ -183,6 +185,9 @@ fn superset_vec(a: &Vec<LocId>, b: &Vec<LocId>) -> bool {
 struct SanityCheck {
 	x: usize,
 }
+impl<'a> SanityCheck {
+    const NUM_CELLS: usize = 3;
+}
 impl<'a> Iterator for SanityCheck {
 	type Item = StatePred;
 	fn next(&mut self) -> Option<Self::Item> {
@@ -191,7 +196,7 @@ impl<'a> Iterator for SanityCheck {
 			None
 		} else {
 			let mut x = HashMap::default();
-			for i in 0..3 {
+			for i in 0..Self::NUM_CELLS {
 				let val = if ((self.x >> i) % 2) == 1 {
 					true
 				} else {
@@ -200,7 +205,7 @@ impl<'a> Iterator for SanityCheck {
 				x.insert(i + 2, val);
 			}
 			self.x += 1;
-			if self.x == 0b1000 {
+			if self.x == (1 << Self::NUM_CELLS) {
 				self.x = STOP;
 			}
 			Some(x)
@@ -362,3 +367,89 @@ where
     }
     sets
 }
+
+/*
+TODO encompass step must be sped up somehow
+TODO investigate further minimizing RBPAs. Note some shit explodes.
+-- idea: what is consequence of adding ..... -1-> ..... rules?
+*/
+
+// struct PowerSetIter {
+//     // guard_buf: &'a mut StatePred,
+//     // locs_buf: &'a mut Vec<LocId>,
+//     mutex_masks: Vec<BigUint>,
+//     counter: BigUint,
+//     one: BigUint,
+//     counter_cap: BigUint,
+//     zero: BigUint,
+//     temp: BigUint,
+// }
+// impl Iterator for PowerSetIter {
+//     type Item = Vec<LocId>;
+//     fn next(&mut self) -> Option<Self::Item> {
+
+//         fn counter_contains(me: &mut PowerSetIter, id: LocId) -> bool {
+//             me.temp.assign_from_slice(&[1]);
+//             me.temp <<= id;
+//             me.temp &= me.counter;
+//             me.temp == me.zero
+//         }
+
+//         if self.counter < self.counter_cap {
+//             // In this instant, `counter` represents a port set in its bits
+//             // 0s correspond to PRESENCE. 1s correspond to ABSENCE.
+//             // eg for port range 0..4: 0b01000 is the set {0,1,2,4}
+//             // (also: safe to skip 0th mask. it's always empty)
+//             for (i, m) in self.mutex_masks.iter().skip(1).enumerate().rev() {
+//                 if counter_contains(self, i) {
+//                     // SET all bits mutex with a at once.
+//                     // corresponds with removing these bits from the set
+//                     // results in chunks of the iteration space being skipped
+//                     // which would have contained mutex pairs
+//                     self.counter |= m;
+//                 }
+//             }
+//             let mut locs_buf = vec![];
+//             // self.locs_buf.clear();
+//             for i in (0..self.mutex_masks.len()).filter(|&x| counter_contains(self, x)) {
+//                 locs_buf.push(i);
+//             }
+//             self.counter += &self.one;
+//             Some(locs_buf)
+//         } else {
+//             None
+//         }
+//     }
+// }
+// impl PowerSetIter {
+//     fn new<M>(rng_end: LocId, mutex_pairs: M) -> Self
+//     where M: IntoIterator<Item = [LocId; 2]> {
+//         let mut one = BigUint::new(vec![1]);
+//         let mut mutex_masks: Vec<_> = std::iter::repeat_with(|| BigUint::default())
+//             .take(rng_end).collect();
+//         for [mut a, mut b] in mutex_pairs {
+//             if a < b {
+//                 std::mem::swap(&mut a, &mut b);
+//             }
+//             if a > b {
+//                 one <<= b;
+//                 mutex_masks[a] |= &one;
+//                 one >>= b;
+//             }
+//         }
+//         Self {
+//             // guard_buf,
+//             // locs_buf,
+//             counter: BigUint::default(),
+//             one,
+//             counter_cap: {
+//                 let mut x = BigUint::new(vec![1]);
+//                 x <<= rng_end;
+//                 x
+//             },
+//             mutex_masks,
+//             zero: BigUint::default(),
+//             temp: BigUint::default(),
+//         }
+//     }
+// }
