@@ -148,7 +148,7 @@ fn main() {
                 .collect::<Vec<_>>()
         );
     }
-
+    println!("===== DOING SANITY CHECK!");
     let mut matches = vec![];
     for state in (SanityCheck { x:0 }) {
     	matches.clear();
@@ -367,6 +367,7 @@ where
     }
     sets
 }
+
 
 /*
 TODO encompass step must be sped up somehow
