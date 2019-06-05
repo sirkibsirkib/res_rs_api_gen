@@ -9,10 +9,6 @@ use reo_rs::proto::traits::Proto;
 use reo_rs::set;
 use reo_rs::LocId;
 
-// use std::io::Write;
-use itertools::Itertools;
-// use num_bigint::BigUint;
-
 static PREAMBLE: &'static str = r#"use reo_rs::tokens::{decimal::*, *};
 
 pub trait XOrT {}
@@ -48,8 +44,52 @@ pub trait Ruled<D: Decimal> {
     type Suffix: Sized;
 }
 
-//////////// RULES ///////////////
 "#;
+
+fn main() -> fmt::Result {
+    let port_set = set! {0,1};
+    let mut s = String::new();
+    let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
+        .new_rbpa(&port_set)
+        .expect("WAH");
+    println!("RBPA START: {:#?}", &rbpa);
+    rbpa.normalize();
+    let mut mem_locs_used: Vec<LocId> = rbpa
+        .rules
+        .iter()
+        .flat_map(|r| r.get_guard().keys().copied())
+        .collect();
+    mem_locs_used.sort();
+    mem_locs_used.dedup();
+    println!("mem_locs_used {:?}", &mem_locs_used);
+
+    let state_idx_to_proto_id: HashMap<LocId, LocId> =
+        mem_locs_used.into_iter().enumerate().collect();
+    println!("state_idx_to_proto_id {:?}", &state_idx_to_proto_id);
+
+    let meta = RbpaMetadata {
+        state_arity: state_idx_to_proto_id.len(),
+        state_idx_to_proto_id,
+        num_rules: rbpa.rules.len(),
+    };
+
+    write!(&mut s, "{}", PREAMBLE)?;
+    write!(&mut s, "//////////// RULES ///////////////")?;
+    for (rule_id, rule) in rbpa.rules.iter().enumerate() {
+        write!(
+            &mut s,
+            "{}",
+            Rule {
+                rule_id,
+                rule,
+                meta: &meta,
+            }
+        )?;
+    }
+    println!("S::::\n{}", s);
+    Ok(())
+}
+
 
 struct RbpaMetadata {
     state_idx_to_proto_id: HashMap<LocId, LocId>,
@@ -71,7 +111,6 @@ impl<'a> fmt::Display for Rule<'a> {
             meta,
         } = self;
         let rule_id = *rule_id;
-        let port = rule.get_port().unwrap();
 
         // first line comment
         let guard_pred = Pred {
@@ -85,9 +124,8 @@ impl<'a> fmt::Display for Rule<'a> {
         write!(
             f,
             "//________ Rule {:0>6} __________________________________\n// POS: {} -{:->6}---> {}",
-            rule_id, guard_pred, port, assign_pred,
-        )
-        .unwrap();
+            rule_id, guard_pred, self.port(), assign_pred,
+        )?;
         self.display_pos(f)?;
 
         for (&i, mi) in meta.state_idx_to_proto_id.iter() {
@@ -101,7 +139,7 @@ impl<'a> fmt::Display for Rule<'a> {
 }
 impl<'a> Rule<'a> {
     fn port(&self) -> LocId {
-        self.rule.get_port().unwrap()
+        self.rule.get_port().expect("No port!")
     }
     fn rule_is_last(&self) -> bool {
         self.rule_id == self.meta.num_rules - 1
@@ -166,13 +204,13 @@ impl<'a> Rule<'a> {
         let rule_id = self.rule_id;
         let rule = self.rule;
 
-        write!(f, "\nimpl").unwrap();
+        write!(f, "\nimpl")?;
         let pure_var_seq = VarSeq {
             len: meta.state_arity,
             but: None,
         };
         if meta.state_arity > 0 {
-            write!(f, "<{}>", &pure_var_seq).unwrap();
+            write!(f, "<{}>", &pure_var_seq)?;
         }
         write!(
             f,
@@ -256,48 +294,6 @@ impl fmt::Display for VarSeq {
     }
 }
 
-fn main() {
-    let port_set = set! {0,1};
-    let mut s = String::new();
-    let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
-        .new_rbpa(&port_set)
-        .expect("WAH");
-    println!("RBPA START: {:#?}", &rbpa);
-    rbpa.normalize();
-    let mut mem_locs_used: Vec<LocId> = rbpa
-        .rules
-        .iter()
-        .flat_map(|r| r.get_guard().keys().copied())
-        .collect();
-    mem_locs_used.sort();
-    mem_locs_used.dedup();
-    println!("mem_locs_used {:?}", &mem_locs_used);
-
-    let state_idx_to_proto_id: HashMap<LocId, LocId> =
-        mem_locs_used.into_iter().enumerate().collect();
-    println!("state_idx_to_proto_id {:?}", &state_idx_to_proto_id);
-
-    let meta = RbpaMetadata {
-        state_arity: state_idx_to_proto_id.len(),
-        state_idx_to_proto_id,
-        num_rules: rbpa.rules.len(),
-    };
-
-    write!(&mut s, "{}", PREAMBLE).unwrap();
-    for (rule_id, rule) in rbpa.rules.iter().enumerate() {
-        write!(
-            &mut s,
-            "{}",
-            Rule {
-                rule_id,
-                rule,
-                meta: &meta,
-            }
-        )
-        .unwrap();
-    }
-    println!("S::::\n{}", s);
-}
 
 struct TypeDecimal(usize);
 impl fmt::Display for TypeDecimal {
@@ -325,7 +321,7 @@ impl<'a> fmt::Display for Pred<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let Pred { meta, pred } = self;
         for i in 0..meta.state_arity {
-            let mi = meta.state_idx_to_proto_id.get(&i).unwrap();
+            let mi = meta.state_idx_to_proto_id.get(&i).expect("BAD MAP");
             match pred.get(mi) {
                 None => write!(f, "."),
                 Some(true) => write!(f, "T"),
