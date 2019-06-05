@@ -1,5 +1,6 @@
-use std::fmt::Write;
-use hashbrown::HashSet;
+use reo_rs::rbpa::RbpaRule;
+use std::fmt::{self, Write};
+
 use reo_rs::rbpa::StatePred;
 
 use hashbrown::HashMap;
@@ -12,8 +13,7 @@ use reo_rs::LocId;
 use itertools::Itertools;
 // use num_bigint::BigUint;
 
-static PREAMBLE: &'static str = 
-r#"use reo_rs::tokens::{decimal::*, *};
+static PREAMBLE: &'static str = r#"use reo_rs::tokens::{decimal::*, *};
 
 pub trait XOrT {}
 impl XOrT for T {}
@@ -40,7 +40,7 @@ pub trait Discerning: Token {
     }
 }
 
-impl<Q> Discerning for State<Q where Self: Ruled<E0> {
+impl<Q> Discerning for State<Q> where Self: Ruled<E0> {
     type List = <Self as Ruled<E0>>::Suffix;
 }
 
@@ -51,182 +51,287 @@ pub trait Ruled<D: Decimal> {
 //////////// RULES ///////////////
 "#;
 
+struct RbpaMetadata {
+    state_idx_to_proto_id: HashMap<LocId, LocId>,
+    num_rules: usize,
+    state_arity: usize,
+}
+
+struct Rule<'a> {
+    rule_id: usize,
+    rule: &'a RbpaRule,
+    meta: &'a RbpaMetadata,
+}
+impl<'a> fmt::Display for Rule<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // let mut all_vars_buf = String::new();
+        let Rule {
+            rule,
+            rule_id,
+            meta,
+        } = self;
+        let rule_id = *rule_id;
+        let port = rule.get_port().unwrap();
+
+        // first line comment
+        let guard_pred = Pred {
+            pred: rule.get_guard(),
+            meta,
+        };
+        let assign_pred = Pred {
+            pred: rule.get_assign(),
+            meta,
+        };
+        write!(
+            f,
+            "//________ Rule {:0>6} __________________________________\n// POS: {} -{:->6}---> {}",
+            rule_id, guard_pred, port, assign_pred,
+        )
+        .unwrap();
+        self.display_pos(f)?;
+
+        for (&i, mi) in meta.state_idx_to_proto_id.iter() {
+            if let Some(&b) = rule.get_guard().get(mi) {
+                self.display_neg(f, i, b)?;
+            }
+        }
+        write!(f, "\n")?;
+        Ok(())
+    }
+}
+impl<'a> Rule<'a> {
+    fn port(&self) -> LocId {
+        self.rule.get_port().unwrap()
+    }
+    fn rule_is_last(&self) -> bool {
+        self.rule_id == self.meta.num_rules - 1
+    }
+    fn display_neg(&self, f: &mut fmt::Formatter, i: LocId, b: bool) -> fmt::Result {
+        let meta = self.meta;
+        let rule_id = self.rule_id;
+
+        write!(f, "// NEG: ")?;
+        for _ in 0..i {
+            write!(f, ".")?;
+        }
+        match b {
+            true => write!(f, "F"),
+            false => write!(f, "T"),
+        }?;
+        for _ in (i + 1)..meta.state_arity {
+            write!(f, ".")?;
+        }
+        write!(f, "\nimpl")?;
+
+        let mismatch_var_seq = VarSeq {
+            len: meta.state_arity,
+            but: Some((i, b)),
+        };
+
+        if meta.state_arity > 0 {
+            write!(f, "<{}>", &mismatch_var_seq)?;
+        }
+        write!(
+            f,
+            " Ruled<{}> for State<({})>\n",
+            TypeDecimal(rule_id),
+            &mismatch_var_seq
+        )?;
+        if !self.rule_is_last() {
+            write!(
+                f,
+                "where State<({})>: Ruled<{}>,\n",
+                &mismatch_var_seq,
+                TypeDecimal(rule_id + 1)
+            )?;
+        }
+        write!(f, "{{\n\ttype Suffix = ")?;
+        if self.rule_is_last() {
+            write!(
+                f,
+                "(Branch<{}, {}, State<({})>, ());\n",
+                TypeDecimal(rule_id),
+                TypeDecimal(self.port()),
+                &mismatch_var_seq
+            )
+        } else {
+            write!(f, "();\n")
+        }?;
+        write!(f, "}}\n\n")?;
+        Ok(())
+    }
+
+    fn display_pos(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let meta = &self.meta;
+        let rule_id = self.rule_id;
+        let rule = self.rule;
+
+        write!(f, "\nimpl").unwrap();
+        let pure_var_seq = VarSeq {
+            len: meta.state_arity,
+            but: None,
+        };
+        if meta.state_arity > 0 {
+            write!(f, "<{}>", &pure_var_seq).unwrap();
+        }
+        write!(
+            f,
+            " Ruled<{}> for State<({})>\nwhere\n",
+            TypeDecimal(rule_id),
+            &pure_var_seq,
+        )?;
+        for (i, mi) in meta.state_idx_to_proto_id.iter() {
+            match rule.get_guard().get(mi) {
+                None => (),
+                Some(true) => write!(f, "\tV{}: XOrT,\n", i)?,
+                Some(false) => write!(f, "\tV{}: XOrF,\n", i)?,
+            }
+        }
+        if !self.rule_is_last() {
+            write!(
+                f,
+                "\tState<({})>: Ruled<{}>,",
+                &pure_var_seq,
+                TypeDecimal(rule_id + 1)
+            )?;
+        }
+        write!(
+            f,
+            "{{\n\ttype Suffix = (\n\t\tBranch<{}, {}, State<(",
+            TypeDecimal(rule_id),
+            TypeDecimal(self.port())
+        )?;
+        for (&i, mi) in meta.state_idx_to_proto_id.iter() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            match rule
+                .get_guard()
+                .get(mi)
+                .or_else(|| rule.get_assign().get(mi))
+            {
+                None => write!(f, "V{}", i),
+                Some(true) => write!(f, "T"),
+                Some(false) => write!(f, "F"),
+            }?;
+        }
+
+        if self.rule_is_last() {
+            write!(f, ")>,\n\t\t(),\n\t);")
+        } else {
+            write!(
+                f,
+                ")>,\n\t\t<State<({})> as Ruled<{}>>::Suffix,\n\t);",
+                &pure_var_seq,
+                TypeDecimal(rule_id)
+            )
+        }?;
+        write!(f, "\n}}\n")?;
+        Ok(())
+    }
+}
+
+struct VarSeq {
+    len: usize,
+    but: Option<(LocId, bool)>,
+}
+impl fmt::Display for VarSeq {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for i in 0..self.len {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            if let Some((loc, b)) = self.but {
+                if loc == i {
+                    match b {
+                        true => write!(f, "T"),
+                        false => write!(f, "F"),
+                    }?;
+                    continue;
+                }
+            }
+            write!(f, "V{}", i)?;
+        }
+        Ok(())
+    }
+}
 
 fn main() {
     let port_set = set! {0,1};
-
     let mut s = String::new();
-
-    // 1. fetch the RBPA, projected onto your port set
     let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
         .new_rbpa(&port_set)
         .expect("WAH");
     println!("RBPA START: {:#?}", &rbpa);
     rbpa.normalize();
-
-    let mut mem_locs_used: Vec<LocId> = rbpa.rules.iter().flat_map(|r| r.get_guard().keys().copied()).collect();
+    let mut mem_locs_used: Vec<LocId> = rbpa
+        .rules
+        .iter()
+        .flat_map(|r| r.get_guard().keys().copied())
+        .collect();
     mem_locs_used.sort();
     mem_locs_used.dedup();
     println!("mem_locs_used {:?}", &mem_locs_used);
 
-    // let state_arity = mem_locs_used.len();
-    let state_idx_to_proto_id: HashMap<LocId, LocId> = mem_locs_used.into_iter().enumerate().collect();
+    let state_idx_to_proto_id: HashMap<LocId, LocId> =
+        mem_locs_used.into_iter().enumerate().collect();
     println!("state_idx_to_proto_id {:?}", &state_idx_to_proto_id);
 
-    let state_arity = state_idx_to_proto_id.len();
-
+    let meta = RbpaMetadata {
+        state_arity: state_idx_to_proto_id.len(),
+        state_idx_to_proto_id,
+        num_rules: rbpa.rules.len(),
+    };
 
     write!(&mut s, "{}", PREAMBLE).unwrap();
-
-    let mut all_vars_buf = String::new();
     for (rule_id, rule) in rbpa.rules.iter().enumerate() {
-
-        // first line comment
-        write!(&mut s, "//^^^^^^^^^ Rule {:0>6} ^^^^^^^^^//\n// POS: ", rule_id).unwrap();
-        write_pred(&mut s, rule.get_guard(), &state_idx_to_proto_id);
-        write!(&mut s, " -{:->6}---> ", rule.get_port().unwrap()).unwrap();
-        write_pred(&mut s, rule.get_assign(), &state_idx_to_proto_id);
-
-        all_vars_buf.clear();
-        for i in 0..state_arity {
-            if i > 0 {
-                write!(&mut all_vars_buf, ", ").unwrap();
+        write!(
+            &mut s,
+            "{}",
+            Rule {
+                rule_id,
+                rule,
+                meta: &meta,
             }
-            write!(&mut all_vars_buf, "V{}", i).unwrap();
-        }
-
-        write!(&mut s, "\nimpl").unwrap();
-        if state_arity > 0 {
-            write!(&mut s, "<{}>", &all_vars_buf).unwrap();
-        }
-        write!(&mut s, " Ruled<").unwrap();
-        write_decimal(&mut s, rule_id);
-        write!(&mut s, "> for State<({})>\nwhere\n", &all_vars_buf).unwrap();
-        for (i, mi) in state_idx_to_proto_id.iter() {
-            match rule.get_guard().get(mi) {
-                None => (),
-                Some(true) => write!(&mut s, "\tV{}: XOrT,\n", i).unwrap(),
-                Some(false) => write!(&mut s, "\tV{}: XOrF,\n", i).unwrap(),
-            }
-        }
-        let rule_is_last = rule_id == rbpa.rules.len() - 1;
-        if !rule_is_last {
-            write!(&mut s, "\tState<({})>: Ruled<,", &all_vars_buf).unwrap();
-            write_decimal(&mut s, rule_id + 1);
-            write!(&mut s, ">,\n").unwrap();
-        }
-        write!(&mut s, "{{\n\ttype Suffix = (\n\t\tBranch<").unwrap();
-        write_decimal(&mut s, rule_id);
-        write!(&mut s, ", ").unwrap();
-        write_decimal(&mut s, rule.get_port().unwrap());
-        write!(&mut s, ", State<(").unwrap();
-        for (&i, mi) in state_idx_to_proto_id.iter() {
-            if i > 0 {
-                write!(&mut s, ", ").unwrap();
-            }
-            match rule.get_guard().get(mi).or_else(|| rule.get_assign().get(mi)) {
-                None => write!(&mut s, "V{}", i).unwrap(),
-                Some(true) => write!(&mut s, "T").unwrap(),
-                Some(false) => write!(&mut s, "F").unwrap(),
-            }
-        }
-        
-        if rule_is_last {
-            write!(&mut s, ")>,\n\t\t(),\n\t);").unwrap();
-        } else {
-            write!(&mut s, ")>,\n\t\t<State<({})> as Ruled<", &all_vars_buf).unwrap();
-            write_decimal(&mut s, rule_id + 1);
-            write!(&mut s, ">>::Suffix,\n\t);").unwrap();
-        }
-        write!(&mut s, "\n}}\n").unwrap();
-
-        for (&i, mi) in state_idx_to_proto_id.iter() {
-            if let Some(b) = rule.get_guard().get(mi) {
-                write!(&mut s, "// NEG: ").unwrap();
-                for _ in 0..i {
-                    write!(&mut s, ".").unwrap();
-                }
-                match b {
-                    true => write!(&mut s, "F").unwrap(),
-                    false => write!(&mut s, "T").unwrap(),
-                }
-                for _ in (i+1)..state_arity {
-                    write!(&mut s, ".").unwrap();
-                }
-                write!(&mut s, "\nimpl").unwrap();
-
-                all_vars_buf.clear();
-                for i2 in 0..state_arity {
-                    if i2 > 0 {
-                        write!(&mut all_vars_buf, ", ").unwrap();
-                    }
-                    if i == i2 {
-                        match b {
-                            true => write!(&mut all_vars_buf, "F").unwrap(),
-                            false => write!(&mut all_vars_buf, "T").unwrap(),
-                        }
-                    } else {
-                        write!(&mut all_vars_buf, "V{}", i2).unwrap();
-                    }
-                }
-                if state_arity > 0 {
-                    write!(&mut s, "<{}>", &all_vars_buf).unwrap();
-                }
-                write!(&mut s, " Ruled<").unwrap();
-                write_decimal(&mut s, rule_id);
-                write!(&mut s, "> for State<({})>\n", &all_vars_buf).unwrap();
-
-            }
-            if !rule_is_last {
-                write!(&mut s, "where State<({})>: Ruled<", &all_vars_buf).unwrap();
-                write_decimal(&mut s, rule_id + 1);
-                write!(&mut s, ">,\n").unwrap();
-            }
-            write!(&mut s, "{{\n\ttype Suffix = ").unwrap();
-            if rule_is_last {
-
-                write!(&mut s, "(Branch<").unwrap();
-                write_decimal(&mut s, rule_id);
-                write!(&mut s, ", ").unwrap();
-                write_decimal(&mut s, rule.get_port().unwrap());
-                write!(&mut s, ", State<({})>, ());\n", &all_vars_buf).unwrap();
-
-            } else {
-                write!(&mut s, "();\n").unwrap();
-            }
-            write!(&mut s, "}}\n\n").unwrap();
-        }
-        write!(&mut s, "\n").unwrap();
+        )
+        .unwrap();
     }
-
-
     println!("S::::\n{}", s);
-
-    // 2. normalize RBPA (removing silent transitions)
 }
 
-fn write_decimal(s: &mut String, mut decimal: usize) {
-    let mut brackets = 0;
-    while decimal > 10 {
-        write!(s, "D{}<", decimal % 10).unwrap();
-        brackets += 1;
-        decimal /= 10;
-    }
-    write!(s, "E{}", decimal).unwrap();
-    for _ in 0..brackets {
-        write!(s, ">").unwrap();
-    }
-}
-
-
-fn write_pred(s: &mut String, pred: &StatePred, state_idx_to_proto_id: &HashMap<LocId, LocId>) {
-    let state_arity = state_idx_to_proto_id.len();
-    for i in 0..state_arity {
-        let mi = state_idx_to_proto_id.get(&i).unwrap();
-        match pred.get(mi) {
-            None => write!(s, ".").unwrap(),
-            Some(true) => write!(s, "T").unwrap(),
-            Some(false) => write!(s, "F").unwrap(),
+struct TypeDecimal(usize);
+impl fmt::Display for TypeDecimal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut decimal = self.0;
+        let mut brackets = 0;
+        while decimal > 10 {
+            write!(f, "D{}<", decimal % 10)?;
+            brackets += 1;
+            decimal /= 10;
         }
+        write!(f, "E{}", decimal)?;
+        for _ in 0..brackets {
+            write!(f, ">")?;
+        }
+        Ok(())
+    }
+}
+
+struct Pred<'a> {
+    pred: &'a StatePred,
+    meta: &'a RbpaMetadata,
+}
+impl<'a> fmt::Display for Pred<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let Pred { meta, pred } = self;
+        for i in 0..meta.state_arity {
+            let mi = meta.state_idx_to_proto_id.get(&i).unwrap();
+            match pred.get(mi) {
+                None => write!(f, "."),
+                Some(true) => write!(f, "T"),
+                Some(false) => write!(f, "F"),
+            }?;
+        }
+        Ok(())
     }
 }
