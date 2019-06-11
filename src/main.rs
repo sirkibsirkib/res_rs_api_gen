@@ -1,5 +1,7 @@
+use cascade::cascade;
 use reo_rs::rbpa::RbpaRule;
-use std::fmt::{self, Write};
+use std::fmt;
+use std::io::Write;
 
 use reo_rs::rbpa::StatePred;
 
@@ -46,38 +48,36 @@ pub trait Ruled<D: Decimal> {
 
 "#;
 
-fn main() -> fmt::Result {
+fn main() -> std::io::Result<()> {
     let port_set = set! {0,1};
-    let mut s = String::new();
-    let mut rbpa = reo_rs_proto::Fifo3::<()>::proto_def()
-        .new_rbpa(&port_set)
-        .expect("WAH");
-    println!("RBPA START: {:#?}", &rbpa);
-    rbpa.normalize();
-    let mut mem_locs_used: Vec<LocId> = rbpa
-        .rules
-        .iter()
-        .flat_map(|r| r.get_guard().keys().copied())
-        .collect();
-    mem_locs_used.sort();
-    mem_locs_used.dedup();
-    println!("mem_locs_used {:?}", &mem_locs_used);
+    let mut stdout = std::io::stdout();
 
-    let state_idx_to_proto_id: HashMap<LocId, LocId> =
-        mem_locs_used.into_iter().enumerate().collect();
-    println!("state_idx_to_proto_id {:?}", &state_idx_to_proto_id);
+    let proto_def = reo_rs_proto::Fifo3::<()>::proto_def();
+    let rbpa = cascade! {
+        proto_def.new_rbpa(&port_set).expect("Rbpa Creation error!");
+        ..normalize();
+    };
+    let mem_locs_used = cascade! {
+        rbpa
+            .rules
+            .iter()
+            .flat_map(|r| r.get_guard().keys().copied())
+            .collect::<Vec<_>>();
+        ..sort();
+        ..dedup();
+    };
 
     let meta = RbpaMetadata {
-        state_arity: state_idx_to_proto_id.len(),
-        state_idx_to_proto_id,
+        state_arity: mem_locs_used.len(),
+        state_idx_to_proto_id: mem_locs_used.into_iter().enumerate().collect(),
         num_rules: rbpa.rules.len(),
     };
 
-    write!(&mut s, "{}", PREAMBLE)?;
-    write!(&mut s, "//////////// RULES ///////////////")?;
+    write!(stdout, "{}", PREAMBLE)?;
+    write!(stdout, "//////////// RULES ///////////////")?;
     for (rule_id, rule) in rbpa.rules.iter().enumerate() {
         write!(
-            &mut s,
+            stdout,
             "{}",
             Rule {
                 rule_id,
@@ -86,10 +86,14 @@ fn main() -> fmt::Result {
             }
         )?;
     }
-    println!("S::::\n{}", s);
     Ok(())
 }
 
+enum LocIdType {
+    Putter,
+    Getter,
+    Mem,
+}
 
 struct RbpaMetadata {
     state_idx_to_proto_id: HashMap<LocId, LocId>,
@@ -123,9 +127,13 @@ impl<'a> fmt::Display for Rule<'a> {
         };
         write!(
             f,
-            "//________ Rule {:0>6} __________________________________\n// POS: {} -{:->6}---> {}",
-            rule_id, guard_pred, self.port(), assign_pred,
+            "//________ Rule {:0>6} __________________________________\n// POS: {} -{:->6}---> {}\n",
+            rule_id,
+            guard_pred,
+            self.port(),
+            assign_pred,
         )?;
+        self.display_check(f)?;
         self.display_pos(f)?;
 
         for (&i, mi) in meta.state_idx_to_proto_id.iter() {
@@ -144,7 +152,7 @@ impl<'a> Rule<'a> {
     fn rule_is_last(&self) -> bool {
         self.rule_id == self.meta.num_rules - 1
     }
-    fn display_neg(&self, f: &mut fmt::Formatter, i: LocId, b: bool) -> fmt::Result {
+    fn display_neg(&self, f: &mut fmt::Formatter, i: LocId, to_mismatch: bool) -> fmt::Result {
         let meta = self.meta;
         let rule_id = self.rule_id;
 
@@ -152,7 +160,7 @@ impl<'a> Rule<'a> {
         for _ in 0..i {
             write!(f, ".")?;
         }
-        match b {
+        match to_mismatch {
             true => write!(f, "F"),
             false => write!(f, "T"),
         }?;
@@ -163,7 +171,7 @@ impl<'a> Rule<'a> {
 
         let mismatch_var_seq = VarSeq {
             len: meta.state_arity,
-            but: Some((i, b)),
+            but: Some((i, !to_mismatch)),
         };
 
         if meta.state_arity > 0 {
@@ -185,17 +193,36 @@ impl<'a> Rule<'a> {
         }
         write!(f, "{{\n\ttype Suffix = ")?;
         if self.rule_is_last() {
+            write!(f, "();\n")
+        } else {
             write!(
                 f,
-                "(Branch<{}, {}, State<({})>, ());\n",
-                TypeDecimal(rule_id),
-                TypeDecimal(self.port()),
-                &mismatch_var_seq
+                "<State<({})> as Ruled<{}>>::Suffix;\n",
+                &mismatch_var_seq,
+                TypeDecimal(rule_id)
             )
-        } else {
-            write!(f, "();\n")
         }?;
         write!(f, "}}\n\n")?;
+        Ok(())
+    }
+
+    fn display_checkable(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let pure_var_seq = VarSeq {
+            len: self.meta.state_arity,
+            but: None,
+        };
+        write!(f, "impl")?;
+        if self.meta.state_arity > 0 {
+            write!(f, "<{}>", &pure_var_seq)?;
+        }
+        write!(
+            f,
+            " Checkable<{}> for State<({})> {{\n\t",
+            TypeDecimal(self.rule_id),
+            &pure_var_seq,
+        )?;
+        self.display_checker_const(f)?;
+        write!(f, "\n}}\n")?;
         Ok(())
     }
 
@@ -203,8 +230,10 @@ impl<'a> Rule<'a> {
         let meta = &self.meta;
         let rule_id = self.rule_id;
         let rule = self.rule;
+        let guard = rule.get_guard();
+        let assign = rule.get_assign();
 
-        write!(f, "\nimpl")?;
+        write!(f, "impl")?;
         let pure_var_seq = VarSeq {
             len: meta.state_arity,
             but: None,
@@ -243,11 +272,7 @@ impl<'a> Rule<'a> {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            match rule
-                .get_guard()
-                .get(mi)
-                .or_else(|| rule.get_assign().get(mi))
-            {
+            match assign.get(mi).or_else(|| guard.get(mi)) {
                 None => write!(f, "V{}", i),
                 Some(true) => write!(f, "T"),
                 Some(false) => write!(f, "F"),
@@ -255,16 +280,44 @@ impl<'a> Rule<'a> {
         }
 
         if self.rule_is_last() {
-            write!(f, ")>,\n\t\t(),\n\t);")
+            write!(f, ")>,\n\t\t(),\n\t);\n")
         } else {
             write!(
                 f,
-                ")>,\n\t\t<State<({})> as Ruled<{}>>::Suffix,\n\t);",
+                ")>,\n\t\t<State<({})> as Ruled<{}>>::Suffix,\n\t);\n",
                 &pure_var_seq,
                 TypeDecimal(rule_id)
             )
         }?;
-        write!(f, "\n}}\n")?;
+        write!(f, "}}\n")?;
+        Ok(())
+    }
+
+    fn display_checker_const(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let guard = self.rule.get_guard();
+        let assign = self.rule.get_assign();
+        write!(f, "const PRED: &[u64] = &[")?;
+        let mut start = 0;
+        while start < self.meta.state_arity {
+            let end = (start + 32).min(self.meta.state_arity);
+            if end > start {
+                if start > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "0b")?;
+            }
+            for i in (start..end).rev() {
+                let mi = self.meta.state_idx_to_proto_id.get(&i).expect("KKx");
+                let s = match assign.get(&mi).or_else(|| guard.get(&mi)) {
+                    Some(true) => "01",
+                    Some(false) => "10",
+                    None => "00",
+                };
+                write!(f, "{}", s)?;
+            }
+            start += 32;
+        }
+        write!(f, "];")?;
         Ok(())
     }
 }
@@ -293,7 +346,6 @@ impl fmt::Display for VarSeq {
         Ok(())
     }
 }
-
 
 struct TypeDecimal(usize);
 impl fmt::Display for TypeDecimal {
