@@ -138,6 +138,11 @@ impl<'a> fmt::Display for Begin<'a> {
                     .expect("k")
             )?;
         }
+
+        write!(f, "SHAPE {:#?}", SHAPE)?;
+
+
+
         write!(f, ");\n")?;
         write!(f, "pub type StartState = ?;\n")?;
 
@@ -157,6 +162,27 @@ impl<'a> fmt::Display for Begin<'a> {
         write!(f, "    );\n")?;
         write!(f, "    Ok(func(ports))\n}}\n")
     }
+}
+
+const SHAPE: ProtoShape = ProtoShape(&[
+    Ruley {
+        actions: &[
+            Action {putter: 0, getters: &[0,1,2]},
+        ]
+    },
+]);
+
+
+#[derive(Debug)]
+struct ProtoShape(&'static [Ruley]);
+#[derive(Debug)]
+struct Ruley {
+    actions: &'static [Action],
+}
+#[derive(Debug)]
+struct Action {
+    putter: LocId,
+    getters: &'static [LocId],
 }
 
 enum LocIdType {
