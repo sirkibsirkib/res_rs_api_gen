@@ -1,10 +1,15 @@
 use cascade::cascade;
+use reo_rs::proto::{PortRole, ProtoDef};
+use reo_rs::rbpa::Rbpa;
 use reo_rs::rbpa::RbpaRule;
+use reo_rs::tokens::decimal::*;
+use std::any::TypeId;
 use std::fmt;
 use std::io::Write;
 
 use reo_rs::rbpa::StatePred;
 
+use bimap::BiMap;
 use hashbrown::HashMap;
 use reo_rs::proto::traits::Proto;
 
@@ -52,7 +57,16 @@ fn main() -> std::io::Result<()> {
     let port_set = set! {0,1};
     let mut stdout = std::io::stdout();
 
-    let proto_def = reo_rs_proto::Fifo3::<()>::proto_def();
+    let proto_def = reo_rs_proto::Fifo3::<E0>::proto_def();
+    let mut type_ids_indexed = BiMap::default();
+    for (i, type_id) in proto_def
+        .type_info
+        .values()
+        .map(|info| info.get_tid())
+        .enumerate()
+    {
+        type_ids_indexed.insert(i, type_id);
+    }
     let rbpa = cascade! {
         proto_def.new_rbpa(&port_set).expect("Rbpa Creation error!");
         ..normalize();
@@ -73,8 +87,13 @@ fn main() -> std::io::Result<()> {
         num_rules: rbpa.rules.len(),
     };
 
-    write!(stdout, "{}", PREAMBLE)?;
-    write!(stdout, "//////////// RULES ///////////////")?;
+    let begin = Begin {
+        proto_def: &proto_def,
+        rbpa: &rbpa,
+        type_ids_indexed: &type_ids_indexed,
+    };
+    write!(stdout, "{}\n{}\n", PREAMBLE, begin)?;
+    write!(stdout, "//////////// RULES ///////////////\n")?;
     for (rule_id, rule) in rbpa.rules.iter().enumerate() {
         write!(
             stdout,
@@ -87,6 +106,57 @@ fn main() -> std::io::Result<()> {
         )?;
     }
     Ok(())
+}
+
+struct Begin<'a> {
+    proto_def: &'a ProtoDef,
+    rbpa: &'a Rbpa,
+    type_ids_indexed: &'a BiMap<usize, TypeId>,
+}
+
+static BEGIN_START_FN: &'static str = r#">(handle: &ProtoHandle, func: F)
+ -> Result<R, GroupAddError>
+where F: FnOnce(Interface<T>) -> R {
+    let mut group = PortGroup::new();
+"#;
+
+impl<'a> fmt::Display for Begin<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pub type Interface<T> = (")?;
+        for (id, info) in self.proto_def.port_info.iter().enumerate() {
+            let role_str = match info.role {
+                PortRole::Putter => "Putter",
+                PortRole::Getter => "Getter",
+            };
+            write!(
+                f,
+                "Grouped<{}, {}<T{}>>, ",
+                TypeDecimal(id),
+                role_str,
+                self.type_ids_indexed
+                    .get_by_right(&info.type_id)
+                    .expect("k")
+            )?;
+        }
+        write!(f, ");\n")?;
+        write!(f, "pub type StartState = ?;\n")?;
+
+        write!(f, "fn api_begin<F, R")?;
+        for index in self.type_ids_indexed.left_values() {
+            write!(f, ", T{}: 'static", index)?;
+        }
+        write!(f, "{}", BEGIN_START_FN)?;
+        write!(f, "    let ports = (\n")?;
+        for (id, info) in self.proto_def.port_info.iter().enumerate() {
+            let role_str = match info.role {
+                PortRole::Putter => "putter",
+                PortRole::Getter => "getter",
+            };
+            write!(f, "        group.add_{}(handle, {})?,\n", role_str, id)?;
+        }
+        write!(f, "    );\n")?;
+        write!(f, "    Ok(func(ports))\n}}\n")
+    }
 }
 
 enum LocIdType {
@@ -133,7 +203,7 @@ impl<'a> fmt::Display for Rule<'a> {
             self.port(),
             assign_pred,
         )?;
-        self.display_check(f)?;
+        self.display_checkable(f)?;
         self.display_pos(f)?;
 
         for (&i, mi) in meta.state_idx_to_proto_id.iter() {
@@ -191,7 +261,7 @@ impl<'a> Rule<'a> {
                 TypeDecimal(rule_id + 1)
             )?;
         }
-        write!(f, "{{\n\ttype Suffix = ")?;
+        write!(f, "{{\n    type Suffix = ")?;
         if self.rule_is_last() {
             write!(f, "();\n")
         } else {
@@ -217,7 +287,7 @@ impl<'a> Rule<'a> {
         }
         write!(
             f,
-            " Checkable<{}> for State<({})> {{\n\t",
+            " Checkable<{}> for State<({})> {{\n    ",
             TypeDecimal(self.rule_id),
             &pure_var_seq,
         )?;
@@ -250,21 +320,21 @@ impl<'a> Rule<'a> {
         for (i, mi) in meta.state_idx_to_proto_id.iter() {
             match rule.get_guard().get(mi) {
                 None => (),
-                Some(true) => write!(f, "\tV{}: XOrT,\n", i)?,
-                Some(false) => write!(f, "\tV{}: XOrF,\n", i)?,
+                Some(true) => write!(f, "    V{}: XOrT,\n", i)?,
+                Some(false) => write!(f, "    V{}: XOrF,\n", i)?,
             }
         }
         if !self.rule_is_last() {
             write!(
                 f,
-                "\tState<({})>: Ruled<{}>,",
+                "    State<({})>: Ruled<{}>,",
                 &pure_var_seq,
                 TypeDecimal(rule_id + 1)
             )?;
         }
         write!(
             f,
-            "{{\n\ttype Suffix = (\n\t\tBranch<{}, {}, State<(",
+            "{{\n    type Suffix = (\n        Branch<{}, {}, State<(",
             TypeDecimal(rule_id),
             TypeDecimal(self.port())
         )?;
@@ -280,11 +350,11 @@ impl<'a> Rule<'a> {
         }
 
         if self.rule_is_last() {
-            write!(f, ")>,\n\t\t(),\n\t);\n")
+            write!(f, ")>,\n        (),\n    );\n")
         } else {
             write!(
                 f,
-                ")>,\n\t\t<State<({})> as Ruled<{}>>::Suffix,\n\t);\n",
+                ")>,\n        <State<({})> as Ruled<{}>>::Suffix,\n    );\n",
                 &pure_var_seq,
                 TypeDecimal(rule_id)
             )
@@ -351,14 +421,20 @@ struct TypeDecimal(usize);
 impl fmt::Display for TypeDecimal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut decimal = self.0;
-        let mut brackets = 0;
+        let mut digits = vec![];
         while decimal > 10 {
-            write!(f, "D{}<", decimal % 10)?;
-            brackets += 1;
+            digits.push(decimal%10);
             decimal /= 10;
         }
-        write!(f, "E{}", decimal)?;
-        for _ in 0..brackets {
+        digits.push(decimal);
+        for (is_last, digit) in digits.iter().enumerate().rev().map(|(i, d)| (i==0, d)) {
+            if is_last {
+                write!(f, "E{}", digit)
+            } else {
+                write!(f, "D{}<", digit)
+            }?;
+        }
+        for _ in 0..digits.len() {
             write!(f, ">")?;
         }
         Ok(())

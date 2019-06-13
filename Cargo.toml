@@ -9,3 +9,4 @@ reo_rs = { path = "../reo_rs" }
 reo_rs_proto = { path = "../reo_rs_proto" }
 hashbrown = "0.2.0"
 cascade = "0.1.3"
+bimap = "0.3.1"
